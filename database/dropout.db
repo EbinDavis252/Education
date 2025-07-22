@@ -1,0 +1,31 @@
+import sqlite3
+
+def init_db():
+    conn = sqlite3.connect("database/dropout.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS student_predictions (
+            student_id TEXT,
+            name TEXT,
+            dropout_risk REAL,
+            intervention TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def save_prediction(student_id, name, risk, recommendation):
+    conn = sqlite3.connect("database/dropout.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO student_predictions VALUES (?, ?, ?, ?)",
+                   (student_id, name, risk, recommendation))
+    conn.commit()
+    conn.close()
+
+def get_all_predictions():
+    conn = sqlite3.connect("database/dropout.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM student_predictions")
+    data = cursor.fetchall()
+    conn.close()
+    return data
