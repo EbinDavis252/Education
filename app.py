@@ -1,84 +1,116 @@
 import streamlit as st
 import pandas as pd
-import os
 import sqlite3
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report
 from sklearn.preprocessing import LabelEncoder
+import numpy as np
 
-st.set_page_config(page_title="Student Dropout Predictor", layout="wide")
+# Page config
+st.set_page_config(page_title="Student Dropout Prediction System", layout="wide")
+st.title("🎓 AI-Powered Student Dropout Prediction & Retention System")
 
-# Create data directory if not exists
-os.makedirs("data", exist_ok=True)
-os.makedirs("database", exist_ok=True)
+# Sidebar menu
+menu = ["Upload Data & Predict", "View Predictions", "Intervention Suggestions"]
+choice = st.sidebar.selectbox("Menu", menu)
 
-st.sidebar.title("Menu")
-menu = st.sidebar.selectbox("Select Option", ["Upload Data & Predict"])
+# DB connection
+def get_connection():
+    return sqlite3.connect("dropout.db")
 
-st.markdown("<h1 style='text-align: center;'>🎓 AI-Powered Student Dropout Prediction & Retention System</h1>", unsafe_allow_html=True)
+# Train model inside app
+@st.cache_resource
+def train_model():
+    try:
+        df = pd.read_csv("data/students_train.csv")
+    except FileNotFoundError:
+        st.error("Training data not found. Please upload students_train.csv in /data/")
+        return None
 
-if menu == "Upload Data & Predict":
-    uploaded_file = st.file_uploader("📤 Upload Training Dataset (CSV)", type=["csv"])
+    label_encoders = {}
+    for col in ["gender", "category", "guardian_education", "counselling_opted", "extra_curricular"]:
+        le = LabelEncoder()
+        df[col] = le.fit_transform(df[col])
+        label_encoders[col] = le
+
+    X = df.drop(columns=["student_id", "name", "dropout"], errors="ignore")
+    y = df["dropout"]
+
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model.fit(X, y)
+    return model, label_encoders
+
+model_data = train_model()
+if model_data is None:
+    st.stop()
+
+model, label_encoders = model_data
+
+# Upload & Predict
+if choice == "Upload Data & Predict":
+    st.subheader("📂 Upload Student Data (CSV)")
+    uploaded_file = st.file_uploader("Choose a CSV file", type=["csv"])
 
     if uploaded_file:
-        file_path = os.path.join("data", "students_train.csv")
-        with open(file_path, "wb") as f:
-            f.write(uploaded_file.read())
-        st.success("✅ File uploaded successfully!")
+        df = pd.read_csv(uploaded_file)
+        original_df = df.copy()
 
-    # Proceed if file exists
-    if os.path.exists("data/students_train.csv"):
-        df = pd.read_csv("data/students_train.csv")
+        # Apply encoders
+        for col in label_encoders:
+            if col in df.columns:
+                df[col] = label_encoders[col].transform(df[col])
 
-        st.subheader("📊 Preview of Uploaded Dataset")
-        st.dataframe(df.head(10))
+        X = df.drop(columns=["student_id", "name"], errors="ignore")
+        predictions = model.predict(X)
+        original_df["predicted_dropout"] = predictions
 
-        if "Dropout" not in df.columns:
-            st.error("❌ 'Dropout' column not found in data. Please include target variable.")
-        else:
-            # Encode target and categorical
-            df = df.dropna()
-            le = LabelEncoder()
-            for col in df.select_dtypes(include="object"):
-                df[col] = le.fit_transform(df[col])
+        st.success("✅ Predictions completed!")
+        st.dataframe(original_df)
 
-            X = df.drop("Dropout", axis=1)
-            y = df["Dropout"]
+        # Save to DB
+        conn = get_connection()
+        cursor = conn.cursor()
 
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42)
+        for _, row in original_df.iterrows():
+            cursor.execute("""
+                INSERT INTO student_predictions (
+                    student_id, name, age, gender, category, family_income,
+                    guardian_education, attendance_rate, academic_score,
+                    assignments_completed, library_usage, hours_spent_online,
+                    counselling_opted, extra_curricular, predicted_dropout
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, tuple(row[col] for col in [
+                "student_id", "name", "age", "gender", "category", "family_income",
+                "guardian_education", "attendance_rate", "academic_score",
+                "assignments_completed", "library_usage", "hours_spent_online",
+                "counselling_opted", "extra_curricular", "predicted_dropout"]))
 
-            model = RandomForestClassifier(n_estimators=100, random_state=42)
-            model.fit(X_train, y_train)
-            y_pred = model.predict(X_test)
+        conn.commit()
+        conn.close()
+        st.success("📥 Predictions saved to database!")
 
-            st.subheader("📈 Model Performance")
-            st.code(classification_report(y_test, y_pred), language="text")
+# View Saved Predictions
+elif choice == "View Predictions":
+    st.subheader("📊 View Saved Predictions")
+    conn = get_connection()
+    df = pd.read_sql_query("SELECT * FROM student_predictions", conn)
+    conn.close()
 
-            st.subheader("🧪 Predict Dropout for New Students")
-            uploaded_pred_file = st.file_uploader("📥 Upload Test File for Prediction (CSV)", type=["csv"], key="predict")
+    st.dataframe(df)
 
-            if uploaded_pred_file:
-                pred_df = pd.read_csv(uploaded_pred_file)
-                pred_input = pred_df.copy()
+# View Interventions
+elif choice == "Intervention Suggestions":
+    st.subheader("🧬 Recommended Interventions for At-Risk Students")
+    conn = get_connection()
+    df = pd.read_sql_query("SELECT * FROM student_predictions WHERE predicted_dropout = 1", conn)
+    conn.close()
 
-                for col in pred_input.select_dtypes(include="object"):
-                    pred_input[col] = le.fit_transform(pred_input[col].astype(str))
-
-                pred_input = pred_input[X.columns]  # Ensure same column order
-                predictions = model.predict(pred_input)
-                pred_df["Dropout_Prediction"] = predictions
-
-                st.write("🔍 Prediction Results")
-                st.dataframe(pred_df)
-
-                csv = pred_df.to_csv(index=False).encode("utf-8")
-                st.download_button("⬇ Download Prediction Results", data=csv, file_name="dropout_predictions.csv", mime="text/csv")
-
-                # Save to SQLite
-                conn = sqlite3.connect("database/dropout.db")
-                pred_df.to_sql("predictions", conn, if_exists="replace", index=False)
-                conn.close()
-                st.success("✅ Predictions saved to SQLite database.")
+    if df.empty:
+        st.info("✅ No at-risk students found.")
     else:
-        st.error("Training data not found. Please upload `students_train.csv`.")
+        for _, row in df.iterrows():
+            st.markdown(f"**{row['name']}** (ID: {row['student_id']})")
+            st.markdown("- Low academic performance — recommend academic counselling")
+            st.markdown("- Offer peer mentoring or tutoring")
+            st.markdown("- Involve parents/guardians")
+            st.markdown("- Schedule regular follow-ups\n")
